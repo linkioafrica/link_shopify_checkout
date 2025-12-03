@@ -17,7 +17,7 @@ function Extension() {
   const [error, setError] = useState(null);
   const [paymentUrl, setPaymentUrl] = useState(null);
   const [isConfigured, setIsConfigured] = useState(true);
-  const app_url = "https://link-shopify-squid-nmot4.ondigitalocean.app/"
+  const app_url = "https://link-shopify-squid-nmot4.ondigitalocean.app"
   // 1. Get essential checkout data
   const shippingAddress = useShippingAddress();
   const email = useEmail();
