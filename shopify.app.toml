@@ -2,7 +2,7 @@
 
 client_id = "048f6a6650727669659c852aa2f01cd2"
 name = "xrpl-checkout-app"
-application_url = "https://link-shopify-squid-nmot4.ondigitalocean.app/"
+application_url = "https://link-shopify-goldfish-app-rlrny.ondigitalocean.app/"
 embedded = true
 
 [build]
