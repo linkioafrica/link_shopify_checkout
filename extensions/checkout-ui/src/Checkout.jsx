@@ -17,7 +17,7 @@ function Extension() {
   const [error, setError] = useState(null);
   const [paymentUrl, setPaymentUrl] = useState(null);
   const [isConfigured, setIsConfigured] = useState(true);
-
+  const app_url = "https://link-shopify-squid-nmot4.ondigitalocean.app/"
   // 1. Get essential checkout data
   const shippingAddress = useShippingAddress();
   const email = useEmail();
@@ -93,7 +93,7 @@ function Extension() {
 
       // 4. Request backend (Your existing logic)
       const response = await fetch(
-        `${process.env.APP_URL}/api/payment/create?shop=${shopify.shop.myshopifyDomain}`,
+        `${app_url}/api/payment/create?shop=${shopify.shop.myshopifyDomain}`,
         {
           method: "POST",
           headers: {
