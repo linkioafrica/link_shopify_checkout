@@ -1,43 +1,36 @@
 import { useEffect, useState } from "react";
-import type {
-  ActionFunctionArgs,
-  HeadersFunction,
-  LoaderFunctionArgs,
-} from "react-router";
+import type { ActionFunctionArgs, HeadersFunction, LoaderFunctionArgs } from "react-router";
 import { useSubmit, useLoaderData, useActionData } from "react-router";
 import { authenticate } from "../shopify.server";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 
+import { initMongo } from "../db.server";
 
-import prisma from "../db.server";
-
-// 💡 FIX: Import or assume the 'json' helper from the framework
-const json = (data: any, init?: ResponseInit) => {
-  return new Response(JSON.stringify(data), {
+// JSON helper
+const json = (data: any, init?: ResponseInit) =>
+  new Response(JSON.stringify(data), {
     headers: { "Content-Type": "application/json", ...init?.headers },
     status: init?.status || 200,
   });
-};
 
-
+// ---------------------- LOADER ----------------------
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
 
+  const { db } = await initMongo();
+
   // Get merchant configuration
-  const config = await prisma.merchantConfig.findUnique({
-    where: { shop },
-  });
+  const config = await db.collection("merchant_configs").findOne({ shop });
 
   // Get recent payments
-  const recentPayments = await prisma.payment.findMany({
-    where: { shop },
-    orderBy: { createdAt: "desc" },
-    take: 10,
-  });
+  const recentPayments = await db
+    .collection("payments")
+    .find({ shop })
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .toArray();
 
-  // 💡 FIX APPLIED HERE: Use the json() helper instead of new Response() 
-  // to correctly serialize the object and set the headers.
   return json({
     config: config
       ? {
@@ -47,17 +40,18 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       }
       : null,
     recentPayments: recentPayments.map((p) => ({
-      id: p.id,
+      _id: p._id.toString(),
       orderName: p.orderName,
       amount: p.amount,
       currency: p.currency,
       status: p.status,
-      createdAt: p.createdAt.toISOString(),
+      createdAt: p.createdAt,
       xrplTxHash: p.xrplTxHash,
     })),
   });
 };
 
+// ---------------------- ACTION ----------------------
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { session } = await authenticate.admin(request);
   const shop = session.shop;
@@ -66,77 +60,31 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const linkBusinessId = formData.get("linkBusinessId") as string;
   const xrplAddress = formData.get("xrplAddress") as string;
 
-  // Validate required fields
   if (!linkBusinessId || !xrplAddress) {
-    // Return a JSON response for errors too
-    return json(
-      {
-        success: false,
-        error: "Both LINK Business ID and XRPL Address are required",
-      },
-      {
-        status: 400,
-      }
-    );
+    return json({ success: false, error: "Both LINK Business ID and XRPL Address are required" }, { status: 400 });
   }
 
-  // Basic XRPL address validation
-  if (!xrplAddress.startsWith("r") || xrplAddress?.length < 25) {
-    // Return a JSON response for errors too
-    return json(
-      {
-        success: false,
-        error: "Invalid XRPL address format",
-      },
-      {
-        status: 400,
-      }
-    );
+  if (!xrplAddress.startsWith("r") || xrplAddress.length < 25) {
+    return json({ success: false, error: "Invalid XRPL address format" }, { status: 400 });
   }
 
   try {
-    await prisma.merchantConfig.upsert({
-      where: { shop },
-      update: {
-        linkBusinessId,
-        xrplAddress,
-        enabled: true,
-      },
-      create: {
-        shop,
-        linkBusinessId,
-        xrplAddress,
-        enabled: true,
-      },
-    });
+    const { db } = await initMongo();
 
-    // Return a JSON response for success
-    return json(
-      {
-        success: true,
-        message: "Configuration saved successfully",
-      },
-      {
-        status: 200,
-      }
+    await db.collection("merchant_configs").updateOne(
+      { shop },
+      { $set: { linkBusinessId, xrplAddress, enabled: true, updatedAt: new Date() } },
+      { upsert: true }
     );
+
+    return json({ success: true, message: "Configuration saved successfully" });
   } catch (error) {
     console.error("Error saving configuration:", error);
-
-    // Return a JSON response for errors too
-    return json(
-      {
-        success: false,
-        error: "Failed to save configuration",
-      },
-      {
-        status: 500,
-      }
-    );
+    return json({ success: false, error: "Failed to save configuration" }, { status: 500 });
   }
 };
 
-
+// ---------------------- REACT COMPONENT ----------------------
 export default function Index() {
   const { config, recentPayments } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
@@ -161,18 +109,17 @@ export default function Index() {
   return (
     <s-page heading="LINK Checkout Configuration">
       {/* SUCCESS / ERROR BANNERS */}
-      {actionData?.success && actionData?.message && (
+      {actionData && actionData?.success && actionData?.message && (
         <s-banner tone="success">{actionData.message}</s-banner>
       )}
-      {actionData?.error && (
+      {actionData && actionData.error && (
         <s-banner tone="critical">{actionData.error}</s-banner>
       )}
 
       {/* MAIN SETTINGS SECTION */}
       <s-section heading="Payment Gateway Settings">
         <s-text>
-          Configure your LINK Business credentials to accept XRPL payments
-          (RLUSD) at checkout.
+          Configure your LINK Business credentials to accept XRPL payments (RLUSD) at checkout.
         </s-text>
 
         <s-stack direction="block" gap="base">
@@ -181,15 +128,12 @@ export default function Index() {
             placeholder="Enter your LINK Business ID"
             value={linkBusinessId}
             onInput={(e: any) => setLinkBusinessId(e.target.value)}
-            help-text="Find this in your LINK Business dashboard under API settings"
           />
-
           <s-text-field
             label="XRPL Receiving Address"
             placeholder="rXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
             value={xrplAddress}
             onInput={(e: any) => setXrplAddress(e.target.value)}
-            help-text="Your XRPL wallet address where payments will be received"
           />
 
           <s-stack direction="inline">
@@ -220,22 +164,16 @@ export default function Index() {
         <s-stack gap="base">
           <s-stack direction="inline" gap="small">
             <s-badge>RLUSD</s-badge>
-            <s-text tone="subdued">Ripple USD</s-text>
+            <s-text tone="info">Ripple USD</s-text>
           </s-stack>
-
-          {/* <s-stack direction="inline" gap="small">
-            <s-badge>USDC</s-badge>
-            <s-text tone="subdued">USD Coin</s-text>
-          </s-stack> */}
         </s-stack>
       </s-section>
 
-      {/* RECENT PAYMENTS SECTION */}
+      {/* RECENT PAYMENTS */}
       <s-section heading="Recent Payments">
-        {recentPayments?.length === 0 ? (
-          <s-text tone="subdued">
-            No payments yet. Payments will appear once customers start
-            using LINK checkout.
+        {recentPayments.length === 0 ? (
+          <s-text tone="info">
+            No payments yet. Payments will appear once customers start using LINK checkout.
           </s-text>
         ) : (
           <s-box padding="base" borderWidth="base" borderRadius="base">
@@ -250,16 +188,13 @@ export default function Index() {
                     <th style={{ padding: "12px", textAlign: "left" }}>TX Hash</th>
                   </tr>
                 </thead>
-
                 <tbody>
-                  {recentPayments?.map((p) => (
-                    <tr key={p.id} style={{ borderBottom: "1px solid #f1f2f3" }}>
+                  {recentPayments.map((p) => (
+                    <tr key={p._id} style={{ borderBottom: "1px solid #f1f2f3" }}>
                       <td style={{ padding: "12px" }}>{p.orderName}</td>
-
                       <td style={{ padding: "12px" }}>
                         {p.amount} {p.currency}
                       </td>
-
                       <td style={{ padding: "12px" }}>
                         <s-badge
                           tone={
@@ -277,13 +212,11 @@ export default function Index() {
                           {p.status}
                         </s-badge>
                       </td>
-
                       <td style={{ padding: "12px" }}>
                         <s-text tone="info">
                           {new Date(p.createdAt).toLocaleDateString()}
                         </s-text>
                       </td>
-
                       <td style={{ padding: "12px" }}>
                         {p.xrplTxHash ? (
                           <a
@@ -310,7 +243,4 @@ export default function Index() {
   );
 }
 
-
-export const headers: HeadersFunction = (headersArgs) => {
-  return boundary.headers(headersArgs);
-};
+export const headers: HeadersFunction = (headersArgs) => boundary.headers(headersArgs);

@@ -1,7 +1,7 @@
 import type { ActionFunctionArgs, LoaderFunction } from "react-router";
-import prisma from "../db.server";
+import { authenticate } from "../shopify.server";
 import { createPaymentLink } from "../services/link.server";
-import { authenticate, unauthenticated } from "../shopify.server";
+import { initMongo } from "../db.server";
 
 export const loader: LoaderFunction = async ({ request }) => {
   const corsHeaders = {
@@ -16,16 +16,15 @@ export const loader: LoaderFunction = async ({ request }) => {
     return new Response(null, { status: 204, headers: corsHeaders });
   }
 
-  return new Response(JSON.stringify({ error: "Missing required fields" }), {
-    status: 400,
-    headers: { ...corsHeaders, "Content-Type": "application/json" },
-  });
+  return new Response(
+    JSON.stringify({ error: "Missing required fields" }),
+    { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+  );
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
-
   const { sessionToken } = await authenticate.public.checkout(request);
-  // console.log("sessionToken", sessionToken);
+
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -33,17 +32,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   };
 
   try {
-    // // Handle preflight requests
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
-    // Get shop from request URL or headers
     const url = new URL(request.url);
-    const shop =
-      url.searchParams.get("shop") ||
-      request.headers.get("x-shopify-shop") ||
-      "";
+    const shop = url.searchParams.get("shop") || request.headers.get("x-shopify-shop") || "";
 
     const body = await request.json();
     const { orderId, orderName, amount, currency } = body;
@@ -55,8 +49,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       );
     }
 
+    const { db } = await initMongo();
+
     // Get merchant configuration
-    const config = await prisma.merchantConfig.findUnique({ where: { shop } });
+    const config = await db.collection("merchant_configs").findOne({ shop });
 
     if (!config || !config.enabled) {
       return new Response(
@@ -66,12 +62,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // Check if payment already exists (idempotency)
-    const existingPayment = await prisma.payment.findFirst({
-      where: {
-        shop,
-        orderId,
-        status: { in: ["pending", "completed"] },
-      },
+    const existingPayment = await db.collection("payments").findOne({
+      shop,
+      orderId,
+      status: { $in: ["pending", "completed"] },
     });
 
     if (existingPayment && existingPayment.linkPaymentUrl) {
@@ -86,7 +80,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     // Create payment link via LINK API
-    const host = new URL(request.url).origin;
+    const host = url.origin;
     const paymentLink = await createPaymentLink({
       businessId: config.linkBusinessId,
       amount,
@@ -96,32 +90,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       successUrl: `${host}/payment/success?order_id=${orderId}`,
       cancelUrl: `${host}/payment/cancel?order_id=${orderId}`,
       webhookUrl: `${host}/api/webhooks/link`,
-      metadata: {
-        shop,
-        xrplAddress: config.xrplAddress,
-      },
+      metadata: { shop, xrplAddress: config.xrplAddress },
     });
+
     console.log("paymentLink", paymentLink);
-    // Store payment in database
-    await prisma.payment.upsert({
-      where: { id: existingPayment?.id || `new-${orderId}-${Date.now()}` },
-      update: {
-        linkPaymentId: paymentLink.paymentId,
-        linkPaymentUrl: paymentLink.paymentUrl,
-        status: "pending",
-        updatedAt: new Date(),
+
+    // Store payment in MongoDB
+    await db.collection("payments").updateOne(
+      { _id: existingPayment?._id || `new-${orderId}-${Date.now()}` },
+      {
+        $set: {
+          linkPaymentId: paymentLink.paymentId,
+          linkPaymentUrl: paymentLink.paymentUrl,
+          status: "pending",
+          updatedAt: new Date(),
+        },
+        $setOnInsert: {
+          shop,
+          orderId,
+          orderName,
+          amount: amount.toString(),
+          currency,
+          createdAt: new Date(),
+        },
       },
-      create: {
-        shop,
-        orderId,
-        orderName,
-        linkPaymentId: paymentLink.paymentId,
-        linkPaymentUrl: paymentLink.paymentUrl,
-        amount: amount.toString(),
-        currency,
-        status: "pending",
-      },
-    });
+      { upsert: true }
+    );
 
     return new Response(
       JSON.stringify({
