@@ -1,12 +1,20 @@
-import type { ActionFunctionArgs } from "react-router";
+import type { ActionFunctionArgs, LoaderFunction } from "react-router";
 import prisma from "../db.server";
 import { createPaymentLink } from "../services/link.server";
 import { authenticate, unauthenticated } from "../shopify.server";
 
+
+export const loader: LoaderFunction = async ({ request }) => {
+  await authenticate.public.checkout(request);
+
+  // App logic
+
+  return null;
+};
 export const action = async ({ request }: ActionFunctionArgs) => {
 
   const { sessionToken } = await authenticate.public.checkout(request);
-  console.log("sessionToken", sessionToken);
+  // console.log("sessionToken", sessionToken);
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
