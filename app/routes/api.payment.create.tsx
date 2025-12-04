@@ -4,18 +4,24 @@ import { createPaymentLink } from "../services/link.server";
 import { authenticate, unauthenticated } from "../shopify.server";
 
 export const loader: LoaderFunction = async ({ request }) => {
-  console.log({ request });
-  await authenticate.public.checkout(request);
   const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": "https://extensions.shopifycdn.com",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "*",
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, Access-Control-Allow-Origin",
+    "Access-Control-Allow-Credentials": "true",
   };
-  return new Response(
-    JSON.stringify({ error: "Missing required fields" }),
-    { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-  );
+
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+
+  return new Response(JSON.stringify({ error: "Missing required fields" }), {
+    status: 400,
+    headers: { ...corsHeaders, "Content-Type": "application/json" },
+  });
 };
+
 export const action = async ({ request }: ActionFunctionArgs) => {
 
   const { sessionToken } = await authenticate.public.checkout(request);
@@ -28,9 +34,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   try {
     // // Handle preflight requests
-    // if (request.method === "OPTIONS") {
-    //   return new Response(null, { status: 204, headers: corsHeaders });
-    // }
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
 
     // Get shop from request URL or headers
     const url = new URL(request.url);
