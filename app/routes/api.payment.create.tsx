@@ -3,13 +3,18 @@ import prisma from "../db.server";
 import { createPaymentLink } from "../services/link.server";
 import { authenticate, unauthenticated } from "../shopify.server";
 
-
 export const loader: LoaderFunction = async ({ request }) => {
+  console.log({ request });
   await authenticate.public.checkout(request);
-
-  // App logic
-
-  return null;
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+  };
+  return new Response(
+    JSON.stringify({ error: "Missing required fields" }),
+    { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+  );
 };
 export const action = async ({ request }: ActionFunctionArgs) => {
 
@@ -22,10 +27,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   };
 
   try {
-    // Handle preflight requests
-    if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: corsHeaders });
-    }
+    // // Handle preflight requests
+    // if (request.method === "OPTIONS") {
+    //   return new Response(null, { status: 204, headers: corsHeaders });
+    // }
 
     // Get shop from request URL or headers
     const url = new URL(request.url);
