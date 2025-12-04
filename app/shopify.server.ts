@@ -37,3 +37,4 @@ export const unauthenticated = shopify.unauthenticated;
 export const addDocumentResponseHeaders = shopify.addDocumentResponseHeaders;
 export const registerWebhooks = shopify.registerWebhooks;
 export const sessionStorageInstance = sessionStorage;
+export const login = shopify.login;
