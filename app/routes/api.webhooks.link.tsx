@@ -72,7 +72,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (status === "completed" && xrplTxHash) {
       try {
         const session = await db
-          .collection("sessions")
+          .collection("shopify_sessions")
           .find({ shop: payment.shop, isOnline: false })
           .sort({ expires: -1 })
           .limit(1)
@@ -230,18 +230,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (payment.draftOrderId) {
         try {
           const session = await db
-            .collection("sessions")
+            .collection("shopify_sessions")
             .find({ shop: payment.shop, isOnline: false })
             .sort({ expires: -1 })
             .limit(1)
             .next();
 
           if (session) {
-            const { admin } = await authenticate.admin(
-              new Request(`https://${payment.shop}/admin`, {
-                headers: { Authorization: `Bearer ${session.accessToken}` },
-              })
-            );
+            const { admin } = await unauthenticated.admin(payment.shop);
 
             // Delete draft order
             await admin.graphql(`
