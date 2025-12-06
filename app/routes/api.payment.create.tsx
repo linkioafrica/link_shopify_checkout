@@ -82,7 +82,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const existingPayment = await db.collection("payments").findOne({
       shop,
       orderId,
-      status: { $in: ["pending", "completed"] },
+      status: { $in: ["pending"] },
     });
 
     if (existingPayment && existingPayment.linkPaymentUrl) {
