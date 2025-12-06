@@ -4,7 +4,8 @@ import {
   useBuyerJourneyIntercept,
   useShippingAddress,
   useEmail,
-  usePhone
+  usePhone,
+  useDeliveryGroups,
 } from '@shopify/ui-extensions/checkout/preact';
 
 
@@ -17,47 +18,96 @@ function Extension() {
   const [error, setError] = useState(null);
   const [paymentUrl, setPaymentUrl] = useState(null);
   const [isConfigured, setIsConfigured] = useState(true);
-  const app_url = "https://link-shopify-goldfish-app-rlrny.ondigitalocean.app"
-  // 1. Get essential checkout data
+  const app_url = process.env.APP_URL || "https://link-shopify-goldfish-app-rlrny.ondigitalocean.app"
   const shippingAddress = useShippingAddress();
   const email = useEmail();
-
   const phone = usePhone();
-  // Helper function to check if the checkout has sufficient data
+  const deliveryGroups = useDeliveryGroups();
 
+  // Helper function to check if order contains physical products
+  const hasPhysicalProducts = () => {
+    if (!deliveryGroups || deliveryGroups.length === 0) return false;
+
+    return deliveryGroups.some(group =>
+      group.deliveryOptions && group.deliveryOptions.length > 0
+    );
+  };
+
+  // Helper function to check if the checkout has sufficient data
   const isCheckoutReady = () => {
-    // Extract values correctly (Shopify returns objects)
     const emailValue = email || "";
     const phoneValue = phone || "";
-
-    const addressReady =
-      shippingAddress &&
-      shippingAddress.city &&
-      shippingAddress.city.trim().length > 0 &&
-      shippingAddress.address1 &&
-      shippingAddress.address1.trim().length > 0;
-    shippingAddress.zip &&
-      shippingAddress.zip.trim().length > 0;
-
+    // Contact information is always required
     const contactReady =
       (emailValue && emailValue.trim().length > 0) ||
       (phoneValue && phoneValue.trim().length > 0);
 
-    return addressReady && contactReady;
+    if (!contactReady) {
+      return false;
+    }
+
+    // Address is only required if there are physical products
+    if (hasPhysicalProducts()) {
+      const addressReady =
+        shippingAddress &&
+        shippingAddress.city &&
+        shippingAddress.city.trim().length > 0 &&
+        shippingAddress.address1 &&
+        shippingAddress.address1.trim().length > 0 &&
+        shippingAddress.zip &&
+        shippingAddress.zip.trim().length > 0;
+
+      return addressReady;
+    }
+
+    // If only digital products, address not required
+    return true;
   };
 
   // 2. Implement the Buyer Journey Intercept
   useBuyerJourneyIntercept(() => {
     const ready = isCheckoutReady();
+
     // If checkout is NOT ready AND no payment link created yet → BLOCK
     if (!ready && !paymentUrl && !isLoading) {
+      const errors = [];
+
+      const emailValue = email || "";
+      const phoneValue = phone || "";
+      const contactReady = (emailValue && emailValue.trim().length > 0) || (phoneValue && phoneValue.trim().length > 0);
+
+      if (!contactReady) {
+        errors.push({
+          message: "Please enter your email or phone number.",
+          field: "contact_information",
+        });
+      }
+
+      if (hasPhysicalProducts()) {
+        const addressReady =
+          shippingAddress &&
+          shippingAddress.city &&
+          shippingAddress.city.trim().length > 0 &&
+          shippingAddress.address1 &&
+          shippingAddress.address1.trim().length > 0 &&
+          shippingAddress.zip &&
+          shippingAddress.zip.trim().length > 0;
+
+        if (!addressReady) {
+          errors.push({
+            message: "Please complete your shipping address.",
+            field: "shipping_address",
+          });
+        }
+      }
+
       return {
         behavior: "block",
         reason: "Missing required details",
-        errors: [
+        errors: errors.length > 0 ? errors : [
           {
-            message: "Please enter your email or phone and shipping details.",
-            field: "contact_information",
+            message: "Please complete all required information.",
+            field: "general",
           },
         ],
       };
@@ -66,12 +116,10 @@ function Extension() {
     // Allow checkout progression
     return { behavior: "allow" };
   });
-  console.log(isCheckoutReady());
+
   const handlePayWithLink = async () => {
     if (!isCheckoutReady()) {
-      // This error block should technically not be reached if the button is correctly disabled,
-      // but it serves as a final programmatic safeguard.
-      setError("Please ensure you have filled out all required shipping and contact information before paying.");
+      setError("Please ensure you have filled out all required information before paying.");
       return;
     }
 
@@ -80,20 +128,58 @@ function Extension() {
     setPaymentUrl(null);
 
     try {
-      // Assuming these global shopify objects are accessible from your setup
+      // ✅ Capture all order details from checkout
       const totalAmount = shopify.cost.totalAmount.value.amount;
       const currency = shopify.cost.totalAmount.value.currencyCode;
       const checkoutId = shopify.checkoutToken.value;
-
-      // 2. Session token
       const token = await shopify.sessionToken.get();
 
-      // 3. XRPL supported currency
+      // ✅ Extract line items
+      const lineItems = shopify.lines.value.map((item) => ({
+        id: item.id,
+        sku: item.merchandise.sku,
+        product_id: item.merchandise.product.id,
+        quantity: item.quantity,
+        variant: {
+          id: item.merchandise.id,
+          title: item.merchandise.title,
+          sku: item.merchandise.sku,
+        },
+      }));
+
+      // ✅ Extract addresses
+      const shippingAddress = shopify.shippingAddress?.value && {
+        firstName: shopify.shippingAddress.value.firstName || "",
+        lastName: shopify.shippingAddress.value.lastName || "",
+        address1: shopify.shippingAddress.value.address1 || "",
+        address2: shopify.shippingAddress.value.address2 || "",
+        city: shopify.shippingAddress.value.city || "",
+        province: shopify.shippingAddress.value.provinceCode || "",
+        zip: shopify.shippingAddress.value.zip || "",
+        country: shopify.shippingAddress.value.countryCode || "",
+        phone: shopify.shippingAddress.value.phone || "",
+      };
+
+      // ✅ Extract costs
+      const subtotal = shopify?.cost?.subtotalAmount?.value?.amount || 0;
+      const shipping = shopify?.cost?.totalShippingAmount?.value?.amount || shopify?.cost?.totalShippingAmount?.value?.amount || 0;
+      const tax = shopify?.cost?.totalTaxAmount?.value?.amount || 0;
+
+      // ✅ Extract discounts
+      let discount = null;
+      if (shopify?.discountAllocations && shopify.discountAllocations.value.length > 0) {
+        const totalDiscount = shopify.discountAllocations?.value.reduce((sum, d) => sum + d.discountedAmount?.amount, 0);
+        discount = {
+          code: shopify.discountAllocations[0].title || "Discount",
+          amount: totalDiscount.toString(),
+        };
+      }
+
       const xrplCurrency = currency === "USD" ? "RLUSD" : "RLUSD";
 
-      // 4. Request backend (Your existing logic)
+      // ✅ Request backend with FULL order details
       const response = await fetch(
-        `${app_url}/api/payment/create?shop=${shopify.shop.myshopifyDomain}`,
+        `${app_url}/api/payment/create`,
         {
           method: "POST",
           headers: {
@@ -106,6 +192,18 @@ function Extension() {
             orderName: `Order ${checkoutId.slice(-8)}`,
             amount: totalAmount,
             currency: xrplCurrency,
+            // ✅ NEW: Send all order details
+            lineItems,
+            shippingAddress,
+            billingAddress: shippingAddress, // Usually same as shipping
+            email: email || "",
+            phone: phone || "",
+            subtotal,
+            shipping,
+            tax,
+            discount,
+            total: totalAmount,
+            note: `Crypto payment for order ${checkoutId.slice(-8)}`,
           }),
         }
       );
@@ -122,13 +220,13 @@ function Extension() {
         return;
       }
 
-      // 5. Store the URL for manual button click
       if (data.paymentUrl) {
-        setPaymentUrl(data.paymentUrl); // Shopify-safe
+        setPaymentUrl(data.paymentUrl);
       } else {
         setError("No payment URL received");
       }
     } catch (err) {
+      console.log(err);
       setError(err.message || "Error initiating payment");
     } finally {
       setIsLoading(false);
@@ -137,11 +235,10 @@ function Extension() {
 
   if (!isConfigured) return null;
 
-  // The button is disabled if data is missing (not ready), or if it's loading
   const buttonDisabled = isLoading || !isCheckoutReady();
 
   return (
-    <s-stack direction="block" gap="base" >
+    <s-stack direction="block" gap="base">
 
       {/* Pay with LINK button */}
       <s-stack direction="inline" gap="base">
@@ -149,7 +246,7 @@ function Extension() {
           variant="secondary"
           onClick={handlePayWithLink}
           loading={isLoading}
-          disabled={buttonDisabled} // <-- This is the core control
+          disabled={buttonDisabled}
           inlineSize='fill'
         >
           <s-stack direction="inline" gap="small">
@@ -161,7 +258,11 @@ function Extension() {
       {/* Warning/Error if checkout data is missing */}
       {!isCheckoutReady() && (
         <s-banner tone="warning">
-          <s-text>Please complete your shipping and contact details above before creating the payment link.</s-text>
+          <s-text>
+            {hasPhysicalProducts()
+              ? "Please complete your shipping and contact details above before creating the payment link."
+              : "Please enter your email or phone number before creating the payment link."}
+          </s-text>
         </s-banner>
       )}
 

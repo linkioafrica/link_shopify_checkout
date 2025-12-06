@@ -1,7 +1,6 @@
 import type { ActionFunctionArgs } from "react-router";
-import { authenticate } from "../shopify.server";
+import { authenticate, unauthenticated } from "../shopify.server";
 import { verifyWebhookSignature } from "../services/link.server";
-import { markOrderAsPaid, cancelOrder } from "../services/shopify.server";
 import { initMongo } from "../db.server";
 
 const WEBHOOK_SECRET = process.env.LINK_WEBHOOK_SECRET || "";
@@ -14,6 +13,7 @@ const json = (data: any, init?: ResponseInit) =>
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   try {
+    console.log("Received LINK webhook", request);
     const { db } = await initMongo();
 
     // Get raw body for signature verification
@@ -39,7 +39,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       error: null,
     });
 
-    // Find the payment
+    // Find the payment with full order details
     const payment = await db.collection("payments").findOne({ linkPaymentId });
 
     if (!payment) {
@@ -47,7 +47,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       return json({ error: "Payment not found" }, { status: 404 });
     }
 
-    // Update payment
+    // Update payment status
     await db.collection("payments").updateOne(
       { _id: payment._id },
       {
@@ -58,10 +58,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           paidAt: status === "completed" ? new Date(timestamp) : payment.paidAt,
           updatedAt: new Date(),
         },
+        $push: {
+          paymentHistory: {
+            timestamp: new Date(),
+            action: status === "completed" ? "payment_completed" : "updated",
+            details: { status, xrplTxHash, confirmations },
+          },
+        },
       }
     );
 
-    // Handle payment completion
+    // ✅ Handle payment completion → Convert draft order to actual order
     if (status === "completed" && xrplTxHash) {
       try {
         const session = await db
@@ -73,19 +80,120 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         if (!session) throw new Error(`No session found for shop: ${payment.shop}`);
 
-        const { admin } = await authenticate.admin(
-          new Request(`https://${payment.shop}/admin`, {
-            headers: { Authorization: `Bearer ${session.accessToken}` },
-          })
-        );
+        const { admin } = await unauthenticated.admin(payment.shop)
 
-        await markOrderAsPaid(admin, {
-          orderId: payment.orderId,
-          transactionHash: xrplTxHash,
-          amount: payment.amount,
-          currency: payment.currency,
-          confirmations,
-        });
+        // ✅ If draft order exists, complete it to create actual order
+        let actualOrderId: string | undefined;
+
+        if (payment.draftOrderId) {
+          console.log(`📝 Converting draft order ${payment.draftOrderId} to actual order...`);
+
+          const completeResult = await admin.graphql(`
+            mutation CompleteDraftOrder($id: ID!) {
+              draftOrderComplete(id: $id) {
+                draftOrder {
+                  id
+                  order {
+                    id
+                    name
+                  }
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `, {
+            variables: { id: payment.draftOrderId },
+          });
+
+          const completedOrder = await completeResult.json();
+          if (completedOrder.data?.draftOrderComplete?.draftOrder?.order) {
+            actualOrderId = completedOrder.data.draftOrderComplete.draftOrder.order.id;
+            console.log(`✅ Actual order created: ${completedOrder.data.draftOrderComplete.draftOrder.order.name}`);
+          } else {
+            console.warn("⚠️ Failed to complete draft order");
+          }
+        }
+
+        // ✅ Add transaction and notes to order
+        if (actualOrderId) {
+          await admin.graphql(`
+            mutation AddTransactionAndNote($orderId: ID!, $input: OrderInput!) {
+              orderUpdate(input: $input) {
+                order {
+                  id
+                  transactions {
+                    id
+                  }
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `, {
+            variables: {
+              orderId: actualOrderId,
+              input: {
+                customAttributes: [
+                  {
+                    key: "xrpl_tx_hash",
+                    value: xrplTxHash,
+                  },
+                  {
+                    key: "payment_method",
+                    value: "XRPL_CRYPTO",
+                  },
+                  {
+                    key: "crypto_confirmations",
+                    value: confirmations.toString(),
+                  },
+                ],
+              },
+            },
+          });
+
+          // Add note to order
+          await admin.graphql(`
+            mutation AddOrderNote($id: ID!, $note: String!) {
+              orderNoteAdd(input: { id: $id, note: $note }) {
+                order {
+                  id
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `, {
+            variables: {
+              id: actualOrderId,
+              note: `Payment completed via XRPL\nTx Hash: ${xrplTxHash}\nConfirmations: ${confirmations}`,
+            },
+          });
+        }
+
+        // ✅ Update payment record with actual order ID
+        await db.collection("payments").updateOne(
+          { _id: payment._id },
+          {
+            $set: {
+              actualOrderId,
+              actualOrderCreatedAt: new Date(),
+            },
+            $push: {
+              paymentHistory: {
+                timestamp: new Date(),
+                action: "order_created",
+                details: { actualOrderId, draftOrderId: payment.draftOrderId },
+              },
+            },
+          }
+        );
 
         // Update webhook log as processed
         await db.collection("webhook_logs").updateMany(
@@ -93,9 +201,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           { $set: { processed: true, shop: payment.shop } }
         );
 
-        console.log(`Successfully processed payment for order ${payment.orderName}`);
+        console.log(`✅ Successfully processed payment for order ${payment.orderName}`);
       } catch (error) {
-        console.error("Error updating Shopify order:", error);
+        console.error("Error creating order:", error);
 
         await db.collection("webhook_logs").updateMany(
           { payload: { $regex: linkPaymentId }, processed: false },
@@ -110,38 +218,56 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
         return json({
           received: true,
-          warning: "Payment recorded but Shopify update failed",
+          warning: "Payment recorded but order creation failed",
         });
       }
     }
 
     // Handle cancellation/expiration
     if (status === "cancelled" || status === "expired") {
-      try {
-        const session = await db
-          .collection("sessions")
-          .find({ shop: payment.shop, isOnline: false })
-          .sort({ expires: -1 })
-          .limit(1)
-          .next();
+      console.log(`📌 Payment ${status}, cleaning up draft order...`);
 
-        if (session) {
-          const { admin } = await authenticate.admin(
-            new Request(`https://${payment.shop}/admin`, {
-              headers: { Authorization: `Bearer ${session.accessToken}` },
-            })
-          );
+      if (payment.draftOrderId) {
+        try {
+          const session = await db
+            .collection("sessions")
+            .find({ shop: payment.shop, isOnline: false })
+            .sort({ expires: -1 })
+            .limit(1)
+            .next();
 
-          await cancelOrder(admin, payment.orderId, `Payment ${status}: LINK payment was ${status}`);
+          if (session) {
+            const { admin } = await authenticate.admin(
+              new Request(`https://${payment.shop}/admin`, {
+                headers: { Authorization: `Bearer ${session.accessToken}` },
+              })
+            );
+
+            // Delete draft order
+            await admin.graphql(`
+              mutation DeleteDraftOrder($id: ID!) {
+                draftOrderDelete(id: $id) {
+                  deletedId
+                  userErrors {
+                    message
+                  }
+                }
+              }
+            `, {
+              variables: { id: payment.draftOrderId },
+            });
+
+            console.log(`✅ Draft order ${payment.draftOrderId} deleted`);
+          }
+        } catch (error) {
+          console.error("Error deleting draft order:", error);
         }
-
-        await db.collection("webhook_logs").updateMany(
-          { payload: { $regex: linkPaymentId }, processed: false },
-          { $set: { processed: true, shop: payment.shop } }
-        );
-      } catch (error) {
-        console.error("Error cancelling Shopify order:", error);
       }
+
+      await db.collection("webhook_logs").updateMany(
+        { payload: { $regex: linkPaymentId }, processed: false },
+        { $set: { processed: true, shop: payment.shop } }
+      );
     }
 
     return json({ received: true });

@@ -1,7 +1,8 @@
 import type { ActionFunctionArgs, LoaderFunction } from "react-router";
-import { authenticate } from "../shopify.server";
+import { authenticate, unauthenticated } from "../shopify.server";
 import { createPaymentLink } from "../services/link.server";
 import { initMongo } from "../db.server";
+import type { OrderDetails } from "../models/Payment";
 
 export const loader: LoaderFunction = async ({ request }) => {
   const corsHeaders = {
@@ -24,7 +25,6 @@ export const loader: LoaderFunction = async ({ request }) => {
 
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { sessionToken } = await authenticate.public.checkout(request);
-
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -37,11 +37,30 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
 
     const url = new URL(request.url);
-    const shop = url.searchParams.get("shop") || request.headers.get("x-shopify-shop") || "";
+    const shop = sessionToken.dest;
+    const { db } = await initMongo();
 
     const body = await request.json();
-    const { orderId, orderName, amount, currency } = body;
+    const {
+      orderId,
+      orderName,
+      amount,
+      currency,
+      // ✅ NEW: Order details from checkout
+      lineItems,
+      shippingAddress,
+      billingAddress,
+      email,
+      phone,
+      subtotal,
+      shipping,
+      tax,
+      discount,
+      total,
+      note,
+    } = body;
 
+    // Validation
     if (!orderId || !orderName || !amount || !currency) {
       return new Response(
         JSON.stringify({ error: "Missing required fields" }),
@@ -49,9 +68,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       );
     }
 
-    const { db } = await initMongo();
-
-    // Get merchant configuration
+    // Get merchant config
     const config = await db.collection("merchant_configs").findOne({ shop });
 
     if (!config || !config.enabled) {
@@ -61,7 +78,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       );
     }
 
-    // Check if payment already exists (idempotency)
+    // ✅ Check for existing payment
     const existingPayment = await db.collection("payments").findOne({
       shop,
       orderId,
@@ -69,6 +86,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
 
     if (existingPayment && existingPayment.linkPaymentUrl) {
+      // Payment link already exists, return it
       return new Response(
         JSON.stringify({
           success: true,
@@ -79,7 +97,23 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       );
     }
 
-    // Create payment link via LINK API
+    // ✅ Build order details object
+    const orderDetails: OrderDetails = {
+      lineItems: lineItems || [],
+      shippingAddress,
+      billingAddress,
+      email,
+      phone,
+      subtotal: subtotal?.toString() || "0",
+      shipping: shipping?.toString() || "0",
+      tax: tax?.toString() || "0",
+      discount,
+      total: total?.toString() || amount.toString(),
+      currency,
+      note,
+    };
+
+    // ✅ Create payment link via LINK API
     const host = url.origin;
     const paymentLink = await createPaymentLink({
       businessId: config.linkBusinessId,
@@ -93,27 +127,96 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       metadata: { shop, xrplAddress: config.xrplAddress },
     });
 
-    console.log("paymentLink", paymentLink);
+    // ✅ Get Shopify admin to create draft order
+    let draftOrderId: string | undefined;
+    let draftOrderUrl: string | undefined;
 
-    // Store payment in MongoDB
+    try {
+      const { admin } = await unauthenticated.admin(sessionToken.dest);
+      // console.log({ admin });
+      // Create draft order on Shopify
+      const draftOrder = await admin.graphql(`
+        mutation CreateDraftOrder($input: DraftOrderInput!) {
+          draftOrderCreate(input: $input) {
+            draftOrder {
+              id
+              invoiceUrl
+            }
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `, {
+        variables: {
+          input: {
+            lineItems: (lineItems || []).map((item: any) => ({
+              variantId: item.variant?.id || item.id,
+              quantity: item.quantity,
+              customPrice: item.price,
+            })),
+            shippingAddress,
+            billingAddress,
+            email,
+            phone,
+            note,
+            appliedDiscount: discount ? {
+              description: discount.code,
+              value: discount.amount,
+              valueType: "FIXED_AMOUNT",
+            } : undefined,
+          },
+        },
+      });
+      // console.log({ draftOrder });
+      const draftOrderData = await draftOrder.json();
+      // console.log({ draftOrderData });
+      if (draftOrderData.data.draftOrderCreate.draftOrder?.id) {
+        draftOrderId = draftOrderData.data.draftOrderCreate.draftOrder.id;
+        draftOrderUrl = draftOrderData.data.draftOrderCreate.draftOrder.invoiceUrl;
+        console.log(`✅ Draft Order Created: ${draftOrderId}`);
+      }
+    } catch (draftError) {
+      console.error("⚠️ Error creating draft order:", draftError);
+      // Don't fail payment creation if draft order fails
+    }
+
+    // ✅ Store payment with full order details
+    const paymentId = `pay_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    const paymentDoc: any = {
+      id: paymentId,
+      shop,
+      orderId,
+      orderName,
+      linkPaymentId: paymentLink.paymentId,
+      linkPaymentUrl: paymentLink.paymentUrl,
+      amount: amount.toString(),
+      currency,
+      status: "pending",
+      orderDetails, // ✅ Store full order details
+      draftOrderId,
+      draftOrderCreatedAt: draftOrderId ? new Date() : undefined,
+      draftOrderUrl,
+      paymentHistory: [
+        {
+          timestamp: new Date(),
+          action: "created",
+          details: {
+            linkPaymentId: paymentLink.paymentId,
+            draftOrderId,
+          },
+        },
+      ],
+      metadata: { xrplAddress: config.xrplAddress },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
     await db.collection("payments").updateOne(
-      { _id: existingPayment?._id || `new-${orderId}-${Date.now()}` },
-      {
-        $set: {
-          linkPaymentId: paymentLink.paymentId,
-          linkPaymentUrl: paymentLink.paymentUrl,
-          status: "pending",
-          updatedAt: new Date(),
-        },
-        $setOnInsert: {
-          shop,
-          orderId,
-          orderName,
-          amount: amount.toString(),
-          currency,
-          createdAt: new Date(),
-        },
-      },
+      { linkPaymentId: paymentLink.paymentId },
+      { $set: paymentDoc },
       { upsert: true }
     );
 
@@ -122,6 +225,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         success: true,
         paymentUrl: paymentLink.paymentUrl,
         paymentId: paymentLink.paymentId,
+        draftOrderId,
+        draftOrderUrl,
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
@@ -129,10 +234,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     console.error("Error creating payment link:", error);
     return new Response(
       JSON.stringify({
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to create payment link",
+        error: error instanceof Error ? error.message : "Failed to create payment link",
       }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
