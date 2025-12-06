@@ -120,7 +120,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         // ✅ Add transaction and notes to order
         if (actualOrderId) {
           await admin.graphql(`
-            mutation AddTransactionAndNote($orderId: ID!, $input: OrderInput!) {
+            mutation AddTransactionAndNote($input: OrderInput!) {
               orderUpdate(input: $input) {
                 order {
                   id
@@ -136,7 +136,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
             }
           `, {
             variables: {
-              orderId: actualOrderId,
+              id: actualOrderId,
               input: {
                 customAttributes: [
                   {
