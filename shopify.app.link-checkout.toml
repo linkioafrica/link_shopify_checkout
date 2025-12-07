@@ -1,20 +1,15 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "048f6a6650727669659c852aa2f01cd2"
-name = "xrpl-checkout-app"
-application_url = "https://link-shopify-goldfish-app-rlrny.ondigitalocean.app/"
+client_id = "29af0448a2913cd04984069cc65c3b15"
+name = "LINK Checkout"
+application_url = "https://example.com"
 embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
 
 [webhooks]
 api_version = "2026-01"
-
-  [[webhooks.subscriptions]]
-  topics = [ "app/scopes_update" ]
-  uri = "/webhooks/app/scopes_update"
-
-  [[webhooks.subscriptions]]
-  topics = [ "app/uninstalled" ]
-  uri = "/webhooks/app/uninstalled"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
@@ -22,6 +17,3 @@ scopes = "read_checkouts,read_payment_customizations,write_draft_orders,write_or
 
 [auth]
 redirect_urls = [ "https://example.com/api/auth" ]
-
-[build]
-automatically_update_urls_on_dev = false
