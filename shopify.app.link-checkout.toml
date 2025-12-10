@@ -2,11 +2,8 @@
 
 client_id = "29af0448a2913cd04984069cc65c3b15"
 name = "LINK Checkout"
-application_url = "https://example.com"
+application_url = "https://link-shopify-goldfish-app-rlrny.ondigitalocean.app/"
 embedded = true
-
-[build]
-automatically_update_urls_on_dev = true
 
 [webhooks]
 api_version = "2026-01"

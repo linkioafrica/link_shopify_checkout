@@ -18,7 +18,7 @@ function Extension() {
   const [error, setError] = useState(null);
   const [paymentUrl, setPaymentUrl] = useState(null);
   const [isConfigured, setIsConfigured] = useState(true);
-  const app_url = process.env.APP_URL || "https://link-shopify-goldfish-app-rlrny.ondigitalocean.app"
+  const app_url = "https://link-shopify-goldfish-app-rlrny.ondigitalocean.app"
   const shippingAddress = useShippingAddress();
   const email = useEmail();
   const phone = usePhone();
@@ -250,7 +250,7 @@ function Extension() {
           inlineSize='fill'
         >
           <s-stack direction="inline" gap="small">
-            <s-text>Pay with RLUSD</s-text>
+            <s-text>Pay with Fiat Stablecoins</s-text>
           </s-stack>
         </s-button>
       </s-stack>
@@ -305,10 +305,10 @@ function Extension() {
       {/* Footer */}
       <s-stack direction="block" gap="small">
         <s-text>
-          Pay securely with cryptocurrency on the XRP Ledger
+          Pay securely with fiat backed stablecoins in USD, EUR, NGN and more
         </s-text>
         <s-text>
-          Supported: RLUSD
+          Supported: RLUSD, USDC, EUROP etc
         </s-text>
         <s-text>
           Compatible wallets: GemWallet, Crossmark, more
